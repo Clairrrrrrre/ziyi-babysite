@@ -2,119 +2,128 @@ export default {
     async fetch(request, env) {
       const url = new URL(request.url);
   
-      // 0) health check
+      // ---- CORS (让浏览器 fetch 不再 Failed to fetch) ----
+      const corsHeaders = {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET,POST,OPTIONS",
+        "access-control-allow-headers": "Content-Type, Authorization",
+      };
+  
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+  
+      // ---- health check ----
       if (url.pathname === "/hello") {
         return new Response("hello from pages functions", {
-          headers: { "content-type": "text/plain; charset=utf-8" },
+          headers: { "content-type": "text/plain; charset=utf-8", ...corsHeaders },
         });
       }
   
-      // 1) AI API: POST /api/ai
+      // ---- API: /api/ai ----
       if (url.pathname === "/api/ai") {
-        // CORS / preflight
-        if (request.method === "OPTIONS") {
-          return new Response(null, { status: 204, headers: corsHeaders() });
-        }
         if (request.method !== "POST") {
-          return json({ error: "Method Not Allowed" }, 405);
+          return new Response(JSON.stringify({ error: "Method Not Allowed" }), {
+            status: 405,
+            headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders },
+          });
         }
   
         try {
-          // ---- env check ----
-          assertEnv(env, ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "GEMINI_API_KEY"]);
-  
-          // ---- auth: must have Bearer access token ----
           const auth = request.headers.get("Authorization") || "";
           const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-          if (!token) return json({ error: "未登录用户（缺少 Bearer token）" }, 401);
-  
-          // ---- body ----
-          const body = await safeJson(request);
-          const prompt = (body?.prompt || "").trim();
-          if (!prompt) return json({ error: "prompt 不能为空" }, 400);
-  
-          // ---- 1) verify user via Supabase Auth (get user) ----
-          const userRes = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              apikey: env.SUPABASE_SERVICE_ROLE_KEY, // 用 service role 作 apikey（稳定）
-            },
-          });
-          const userText = await userRes.text();
-          if (!userRes.ok) {
-            return json({ error: `无效用户: ${userRes.status} ${userText}` }, 401);
+          if (!token) {
+            return json({ error: "未登录用户（缺少 Bearer token）" }, 401, corsHeaders);
           }
-          const userJson = JSON.parse(userText);
-          const userId = userJson?.id;
-          if (!userId) return json({ error: "无效用户：缺少 user id" }, 401);
   
-          // ---- 2) call Gemini ----
+          const bodyText = await request.text();
+          if (!bodyText) return json({ error: "body 不能为空" }, 400, corsHeaders);
+  
+          let body;
+          try {
+            body = JSON.parse(bodyText);
+          } catch {
+            return json({ error: "body 必须是合法 JSON" }, 400, corsHeaders);
+          }
+  
+          const prompt = (body?.prompt || "").trim();
+          if (!prompt) return json({ error: "prompt 不能为空" }, 400, corsHeaders);
+  
+          // env check
+          if (!env.SUPABASE_URL) return json({ error: "SUPABASE_URL missing" }, 500, corsHeaders);
+          if (!env.SUPABASE_SERVICE_ROLE_KEY) return json({ error: "SUPABASE_SERVICE_ROLE_KEY missing" }, 500, corsHeaders);
+          if (!env.GEMINI_API_KEY) return json({ error: "GEMINI_API_KEY missing" }, 500, corsHeaders);
+  
+          // 1) 用 token 去 Supabase Auth 拿 user
+          const user = await getSupabaseUser(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, token);
+  
+          // 2) 调 Gemini
           const answer = await callGemini(env.GEMINI_API_KEY, prompt);
   
-          // ---- 3) insert into Supabase DB (messages) ----
-          const insertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/messages`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-              apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-              "Content-Type": "application/json",
-              Prefer: "return=minimal",
-            },
-            body: JSON.stringify([{ user_id: userId, prompt, answer }]),
+          // 3) 写 messages 表（用 service role，demo 先不管 RLS）
+          await insertMessage(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+            user_id: user.id,
+            prompt,
+            answer,
           });
   
-          if (!insertRes.ok) {
-            const t = await insertRes.text();
-            return json({ error: `DB insert failed: ${insertRes.status} ${t}` }, 500);
-          }
-  
-          return json({ answer }, 200);
+          return json({ answer }, 200, corsHeaders);
         } catch (e) {
-          return json({ error: e?.message || String(e) }, 500);
+          return json({ error: e?.message || String(e) }, 500, corsHeaders);
         }
       }
   
-      // 2) everything else -> static assets
+      // 其他请求走静态资源
       return env.ASSETS.fetch(request);
     },
   };
   
-  function corsHeaders() {
-    return {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    };
-  }
-  
-  function json(obj, status = 200) {
+  function json(obj, status, corsHeaders) {
     return new Response(JSON.stringify(obj), {
       status,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        ...corsHeaders(),
-      },
+      headers: { "content-type": "application/json; charset=utf-8", ...corsHeaders },
     });
   }
   
-  async function safeJson(request) {
-    const text = await request.text();
-    if (!text) return null;
+  async function getSupabaseUser(supabaseUrl, serviceRoleKey, userToken) {
+    const res = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${userToken}`,
+      },
+    });
+  
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Supabase auth error ${res.status}: ${text}`);
+  
+    let data;
     try {
-      return JSON.parse(text);
+      data = JSON.parse(text);
     } catch {
-      return null;
+      throw new Error(`Supabase auth returned non-JSON: ${text}`);
     }
+  
+    if (!data?.id) throw new Error("Supabase auth: user not found");
+    return data;
   }
   
-  function assertEnv(env, keys) {
-    for (const k of keys) {
-      if (!env[k]) throw new Error(`${k} missing`);
-    }
+  async function insertMessage(supabaseUrl, serviceRoleKey, row) {
+    const res = await fetch(`${supabaseUrl}/rest/v1/messages`, {
+      method: "POST",
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify([row]),
+    });
+  
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Supabase insert error ${res.status}: ${text}`);
   }
   
   async function callGemini(apiKey, prompt) {
-    // 你老板要求：gemini-2.5-flash
     const url =
       "https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=" +
       apiKey;
@@ -129,8 +138,13 @@ export default {
   
     const text = await res.text();
     if (!res.ok) throw new Error(`Gemini error ${res.status}: ${text}`);
-    if (!text) throw new Error("Gemini empty response body");
   
-    const data = JSON.parse(text);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`Gemini returned non-JSON: ${text}`);
+    }
+  
     return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "（Gemini 没有返回内容）";
   }
