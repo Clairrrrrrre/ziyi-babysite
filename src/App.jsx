@@ -3,177 +3,163 @@ import { supabase } from "./lib/supabaseClient";
 
 export default function App() {
   const [session, setSession] = useState(null);
-
-  // auth form
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  // ai demo
   const [prompt, setPrompt] = useState("");
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
+  const [error, setError] = useState("");
 
+  // 初始化登录态
   useEffect(() => {
-    // 1) 初次加载拿 session
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
-
-    // 2) 监听登录状态变化
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
     });
 
-    return () => sub.subscription.unsubscribe();
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  async function signUp() {
-    setErr("");
-    const { error } = await supabase.auth.signUp({ email, password });
-    if (error) setErr(error.message);
-    else setErr("注册成功（如果你开启了邮箱验证，请去邮箱点确认）");
-  }
+  // 注册
+  const signUp = async () => {
+    setError("");
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+    });
+    if (error) {
+      setError(error.message);
+    } else {
+      alert("注册成功，请去邮箱验证后再登录");
+    }
+  };
 
-  async function signIn() {
-    setErr("");
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) setErr(error.message);
-  }
+  // 登录
+  const signIn = async () => {
+    setError("");
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (error) {
+      setError(error.message);
+    }
+  };
 
-  async function signOut() {
+  // 退出
+  const signOut = async () => {
     await supabase.auth.signOut();
+    setSession(null);
     setAnswer("");
     setPrompt("");
-  }
+  };
 
-  async function askAI() {
-    setErr("");
+  // 调用 AI
+  const sendToAI = async () => {
+    if (!prompt.trim()) return;
+
     setLoading(true);
+    setError("");
     setAnswer("");
 
     try {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
-      if (!token) {
-        setErr("未登录，无法调用 AI");
-        return;
-      }
-
       const res = await fetch("/api/ai", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({ prompt }),
       });
 
-      const json = await res.json();
-      if (!res.ok) throw new Error(json?.error || "调用失败");
+      const text = await res.text();
 
-      setAnswer(json.answer);
+      if (!res.ok) {
+        throw new Error(text || "AI 请求失败");
+      }
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error("后端返回了非 JSON 内容");
+      }
+
+      setAnswer(data.answer || "");
     } catch (e) {
-      setErr(e.message || String(e));
+      setError(e.message || "请求失败");
     } finally {
       setLoading(false);
     }
+  };
+
+  // 未登录态
+  if (!session) {
+    return (
+      <div style={{ maxWidth: 420, margin: "80px auto", fontFamily: "sans-serif" }}>
+        <h2>登录 / 注册</h2>
+
+        <input
+          placeholder="邮箱"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          style={{ width: "100%", marginBottom: 8 }}
+        />
+
+        <input
+          placeholder="密码"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          style={{ width: "100%", marginBottom: 12 }}
+        />
+
+        <button onClick={signIn} style={{ marginRight: 8 }}>
+          登录
+        </button>
+        <button onClick={signUp}>注册</button>
+
+        {error && <p style={{ color: "red" }}>{error}</p>}
+      </div>
+    );
   }
 
+  // 已登录态
   return (
-    <div style={{ maxWidth: 720, margin: "40px auto", padding: 16 }}>
-      <h1 style={{ fontSize: 28, marginBottom: 8 }}>ziyi-babysite</h1>
-      <p style={{ opacity: 0.7, marginBottom: 24 }}>
-        Demo: Supabase 登录 + Gemini AI（通过 Cloudflare Functions）+ 写入 Supabase messages 表
-      </p>
+    <div style={{ maxWidth: 600, margin: "60px auto", fontFamily: "sans-serif" }}>
+      <h2>AI Demo</h2>
+      <p>已登录：{session.user.email}</p>
 
-      {!session ? (
-        <div style={{ border: "1px solid #333", borderRadius: 12, padding: 16 }}>
-          <h2 style={{ fontSize: 18, marginBottom: 12 }}>登录 / 注册</h2>
+      <textarea
+        rows={4}
+        placeholder="输入你想问 AI 的内容"
+        value={prompt}
+        onChange={(e) => setPrompt(e.target.value)}
+        style={{ width: "100%", marginBottom: 12 }}
+      />
 
-          <div style={{ display: "grid", gap: 10 }}>
-            <input
-              placeholder="Email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              style={{ padding: 10, borderRadius: 8, border: "1px solid #555" }}
-            />
-            <input
-              placeholder="Password（至少6位）"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              style={{ padding: 10, borderRadius: 8, border: "1px solid #555" }}
-            />
+      <button onClick={sendToAI} disabled={loading}>
+        {loading ? "生成中…" : "发送 AI"}
+      </button>
 
-            <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={signIn} style={btnStyle}>
-                登录
-              </button>
-              <button onClick={signUp} style={btnStyleSecondary}>
-                注册
-              </button>
-            </div>
+      <button onClick={signOut} style={{ marginLeft: 12 }}>
+        退出登录
+      </button>
 
-            {err ? <div style={{ color: "#ff6b6b" }}>{err}</div> : null}
-          </div>
-        </div>
-      ) : (
-        <div style={{ border: "1px solid #333", borderRadius: 12, padding: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-            <div>
-              <div style={{ fontSize: 14, opacity: 0.7 }}>已登录</div>
-              <div style={{ fontSize: 16 }}>{session.user.email}</div>
-            </div>
-            <button onClick={signOut} style={btnStyleSecondary}>
-              退出登录
-            </button>
-          </div>
+      {error && <p style={{ color: "red", marginTop: 16 }}>{error}</p>}
 
-          <hr style={{ margin: "16px 0", opacity: 0.2 }} />
-
-          <h2 style={{ fontSize: 18, marginBottom: 8 }}>AI Demo</h2>
-          <textarea
-            placeholder="输入一句话，然后点「发给 AI」"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={5}
-            style={{
-              width: "100%",
-              padding: 10,
-              borderRadius: 8,
-              border: "1px solid #555",
-              marginBottom: 10,
-            }}
-          />
-
-          <button onClick={askAI} style={btnStyle} disabled={loading || !prompt.trim()}>
-            {loading ? "生成中..." : "发给 AI"}
-          </button>
-
-          {err ? <div style={{ color: "#ff6b6b", marginTop: 10 }}>{err}</div> : null}
-
-          {answer ? (
-            <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: "rgba(255,255,255,0.05)" }}>
-              <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 6 }}>AI 回复</div>
-              <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{answer}</div>
-            </div>
-          ) : null}
+      {answer && (
+        <div style={{ marginTop: 24 }}>
+          <h3>AI 回复</h3>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{answer}</pre>
         </div>
       )}
     </div>
   );
 }
-
-const btnStyle = {
-  padding: "10px 14px",
-  borderRadius: 10,
-  border: "1px solid #666",
-  cursor: "pointer",
-};
-
-const btnStyleSecondary = {
-  padding: "10px 14px",
-  borderRadius: 10,
-  border: "1px solid #666",
-  cursor: "pointer",
-  opacity: 0.85,
-};
