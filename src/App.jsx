@@ -144,7 +144,13 @@ export default function App() {
         style={{ width: "100%", marginBottom: 12 }}
       />
 
-      <button onClick={sendToAI} disabled={loading}>
+      <button
+        onClick={() => {
+          alert("按钮被点到了");
+          sendToAI();
+        }}
+        disabled={loading}
+      >
         {loading ? "生成中…" : "发送 AI"}
       </button>
 
