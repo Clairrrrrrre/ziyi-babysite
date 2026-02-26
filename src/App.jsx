@@ -69,29 +69,15 @@ export default function App() {
     setAnswer("");
 
     try {
-      const res = await fetch("/api/ai", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ prompt }),
+      const { data, error } = await supabase.functions.invoke("ai", {
+        body: { prompt },
       });
 
-      const text = await res.text();
-
-      if (!res.ok) {
-        throw new Error(text || "AI 请求失败");
+      if (error) {
+        throw new Error(error.message || "AI 请求失败");
       }
 
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        throw new Error("后端返回了非 JSON 内容");
-      }
-
-      setAnswer(data.answer || "");
+      setAnswer(data?.answer || "");
     } catch (e) {
       setError(e.message || "请求失败");
     } finally {
@@ -146,7 +132,6 @@ export default function App() {
 
       <button
         onClick={() => {
-          alert("按钮被点到了");
           sendToAI();
         }}
         disabled={loading}
